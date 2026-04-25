@@ -1,0 +1,4 @@
+interface:
+  display_name: "Consultor Financeiro"
+  short_description: "Consultor IA financeiro para o Saldo Inteligente"
+  default_prompt: "Use $consultor-financeiro para evoluir o Consultor IA do Saldo Inteligente como um consultor financeiro digital, usando dados reais do app e suitability."

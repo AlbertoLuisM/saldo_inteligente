@@ -1,0 +1,32 @@
+# Dependencies
+node_modules/
+
+# Next.js
+.next/
+out/
+
+# Build and cache output
+dist/
+build/
+coverage/
+.cache/
+.turbo/
+*.tsbuildinfo
+
+# Environment files
+.env
+.env.*
+!.env.example
+!.env.*.example
+
+# Local tooling and runtime artifacts
+.docker/
+.vercel/
+*.log
+dev-server.*.log
+tmp-*
+.abacus.donotdelete
+
+# OS/editor noise
+.DS_Store
+Thumbs.db

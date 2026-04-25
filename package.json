@@ -1,0 +1,15 @@
+{
+  "name": "saldo-inteligente-workspace",
+  "private": true,
+  "scripts": {
+    "dev": "yarn --cwd nextjs_space dev",
+    "build": "yarn --cwd nextjs_space build",
+    "start": "yarn --cwd nextjs_space start",
+    "lint": "yarn --cwd nextjs_space lint",
+    "db:up": "yarn --cwd nextjs_space db:up",
+    "db:down": "yarn --cwd nextjs_space db:down",
+    "db:generate": "yarn --cwd nextjs_space db:generate",
+    "db:push": "yarn --cwd nextjs_space db:push",
+    "db:studio": "yarn --cwd nextjs_space db:studio"
+  }
+}

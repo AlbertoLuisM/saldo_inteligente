@@ -1,0 +1,4 @@
+﻿interface:
+  display_name: "Consultor Financeiro"
+  short_description: "Planejamento financeiro com fontes verificadas"
+  default_prompt: "Use $consultor-financeiro para analisar uma carteira, objetivo financeiro ou decisao de investimento com suitability e fontes atualizadas."
