@@ -103,6 +103,38 @@ function getFocus(question: string): Focus {
   return "general";
 }
 
+function isGreetingOnly(question: string) {
+  const normalized = normalizeText(question)
+    .replace(/[^\p{L}\p{N}\s]/gu, " ")
+    .replace(/\s+/g, " ")
+    .trim();
+
+  if (!normalized) return false;
+
+  const greetings = new Set([
+    "oi",
+    "ola",
+    "opa",
+    "e ai",
+    "eae",
+    "salve",
+    "bom dia",
+    "boa tarde",
+    "boa noite",
+    "hello",
+    "hey",
+  ]);
+
+  if (greetings.has(normalized)) return true;
+
+  return /^(oi|ola|opa|bom dia|boa tarde|boa noite|hello|hey)( tudo bem)?( consultor)?$/.test(normalized);
+}
+
+function wantsFullReport(question: string) {
+  const normalized = normalizeText(question);
+  return /(relatorio|analise completa|diagnostico completo|parecer completo|visao geral|analise geral|me diga tudo|resumo completo)/.test(normalized);
+}
+
 function monthsUntil(now: Date, targetDate: Date) {
   const yearDiff = targetDate.getFullYear() - now.getFullYear();
   const monthDiff = targetDate.getMonth() - now.getMonth();
@@ -316,6 +348,243 @@ export function buildConsultorReply(context: ConsultorContext) {
 
   const monthIncomeDiff = totalIncome - lastMonthIncome;
   const monthExpenseDiff = totalExpenses - lastMonthExpense;
+  const wantsDetailedReport = wantsFullReport(question);
+  const highestInterestDebt = [...activeDebts].sort((a, b) => b.interestRate - a.interestRate)[0];
+
+  if (isGreetingOnly(question)) {
+    const shortStatus = netBalance < 0
+      ? `Pelo que esta cadastrado, seu saldo mensal projetado esta negativo em ${formatCurrency(Math.abs(netBalance))}.`
+      : totalIncome > 0 || totalExpenses > 0 || debtMonthlyImpact > 0
+        ? `Pelo que esta cadastrado, seu saldo mensal projetado esta em ${formatCurrency(netBalance)}.`
+        : `Ainda preciso dos seus lancamentos para personalizar a analise com numeros.`;
+
+    const suggestedFocus = netBalance < 0
+      ? `posso te ajudar a montar um plano para voltar ao azul.`
+      : activeDebts.length > 0
+        ? `posso te ajudar a priorizar dividas, gastos e metas.`
+        : activeGoals.length > 0
+          ? `posso te ajudar a ajustar o ritmo das suas metas.`
+          : `posso te ajudar a diagnosticar receitas, despesas, dividas e metas.`;
+
+    return `Ola! Sou seu Consultor Financeiro IA.
+
+${shortStatus} ${suggestedFocus}
+
+Para comecar, me diga o que voce quer resolver agora. Exemplos:
+
+- Qual e minha prioridade financeira este mes?
+- Quais gastos posso cortar?
+- Tenho folga para investir?
+- Como organizo minhas dividas?`;
+  }
+
+  if (!wantsDetailedReport && focus === "debt") {
+    const debtLines = activeDebts.length > 0
+      ? activeDebts
+          .slice()
+          .sort((a, b) => b.interestRate - a.interestRate)
+          .slice(0, 4)
+          .map((debt) => {
+            const installment = debt.installmentAmount
+              ? debt.installmentAmount
+              : calcPMT(debt.originalAmount, debt.interestRate, debt.installments);
+            return `- **${debt.description}:** saldo ${formatCurrency(debt.remainingBalance)}, parcela ${formatCurrency(installment)}, taxa ${formatPercent(debt.interestRate)} ao mes.`;
+          })
+          .join("\n")
+      : "- Nao encontrei dividas ativas cadastradas.";
+
+    const directAnswer = activeDebts.length > 0
+      ? highestInterestDebt
+        ? `A prioridade e a divida "${highestInterestDebt.description}", porque ela tem a maior taxa cadastrada: ${formatPercent(highestInterestDebt.interestRate)} ao mes.`
+        : `A prioridade e reduzir o peso das parcelas no seu fluxo mensal.`
+      : `Nao encontrei dividas ativas no cadastro. Se existe cartao, cheque especial ou emprestimo fora do app, cadastre para eu priorizar corretamente.`;
+
+    return `## Resposta direta
+
+${directAnswer}
+
+## O que seus dados mostram
+
+- **Parcelas do mes:** ${formatCurrency(debtMonthlyImpact)} (${formatPercent(debtServiceRatio)} da renda)
+- **Saldo total em dividas:** ${formatCurrency(totalDebt)}
+- **Saldo mensal depois de despesas e parcelas:** ${formatCurrency(netBalance)}
+- **Contas atrasadas:** ${overdueBills.length}
+
+${debtLines}
+
+## O que fazer agora
+
+1. ${overdueBills.length > 0 ? `Regularize ou renegocie as ${overdueBills.length} conta(s) atrasada(s) antes de amortizar outras dividas.` : highestInterestDebt ? `Direcione qualquer valor extra primeiro para "${highestInterestDebt.description}".` : `Confirme se todas as dividas reais estao cadastradas.`}
+2. ${debtServiceRatio > 20 ? `Renegocie parcelas para reduzir o comprometimento de ${formatPercent(debtServiceRatio)} para abaixo de 15% da renda.` : `Mantenha as parcelas em dia e evite assumir nova divida ate ter reserva.`}
+3. ${netBalance < 0 ? `Libere pelo menos ${formatCurrency(Math.abs(netBalance))} no mes com cortes, renegociacao ou entrada extra antes de pensar em investimento.` : `Use parte da sobra de ${formatCurrency(netBalance)} para amortizar a divida mais cara ou reforcar reserva.`}
+
+## Preciso confirmar
+
+- As taxas e parcelas cadastradas estao atualizadas?
+- Existe divida de cartao, cheque especial ou emprestimo fora do app?`;
+  }
+
+  if (!wantsDetailedReport && focus === "expense") {
+    const categoryLines = sortedCategories.length > 0
+      ? sortedCategories
+          .slice(0, 5)
+          .map(({ category, amount }) => `- **${category}:** ${formatCurrency(amount)} (${formatPercent(totalIncome > 0 ? (amount / totalIncome) * 100 : 0)} da renda)`)
+          .join("\n")
+      : "- Nao encontrei despesas cadastradas no mes atual.";
+
+    return `## Resposta direta
+
+${topVariableCategory ? `O melhor corte inicial esta em **${topVariableCategory[0]}**: essa categoria soma ${formatCurrency(topVariableCategory[1])}. Um corte de 15% liberaria cerca de ${formatCurrency(topVariableCategory[1] * 0.15)} neste mes.` : `Ainda nao ha despesas variaveis suficientes para eu apontar um corte com precisao.`}
+
+## O que seus dados mostram
+
+- **Receitas do mes:** ${formatCurrency(totalIncome)}
+- **Despesas fixas:** ${formatCurrency(fixedTotal)} (${formatPercent(totalIncome > 0 ? (fixedTotal / totalIncome) * 100 : 0)} da renda)
+- **Despesas variaveis:** ${formatCurrency(variableTotal)} (${formatPercent(totalIncome > 0 ? (variableTotal / totalIncome) * 100 : 0)} da renda)
+- **Saldo mensal depois de parcelas:** ${formatCurrency(netBalance)}
+
+${categoryLines}
+
+## O que fazer agora
+
+1. ${topVariableCategory ? `Defina teto de ${formatCurrency(topVariableCategory[1] * 0.85)} para ${topVariableCategory[0]} neste mes.` : `Cadastre as principais despesas do mes por categoria.`}
+2. Separe gastos em essencial, negociavel e cortavel.
+3. ${netBalance < 0 ? `A meta minima e liberar ${formatCurrency(Math.abs(netBalance))} para sair do vermelho.` : `Direcione parte da sobra de ${formatCurrency(netBalance)} para reserva ou meta prioritaria.`}
+
+## Preciso confirmar
+
+- Alguma despesa de cartao ainda nao entrou no app?
+- Existe gasto grande previsto nos proximos 30 dias?`;
+  }
+
+  if (!wantsDetailedReport && focus === "goal") {
+    const goalLines = activeGoals.length > 0
+      ? activeGoals
+          .slice()
+          .sort((a, b) => new Date(a.deadline).getTime() - new Date(b.deadline).getTime())
+          .slice(0, 4)
+          .map((goal) => {
+            const remaining = Math.max(0, goal.targetAmount - goal.currentAmount);
+            const months = monthsUntil(now, new Date(goal.deadline));
+            return `- **${goal.title}:** faltam ${formatCurrency(remaining)}; ritmo necessario de ${formatCurrency(remaining / months)} por mes.`;
+          })
+          .join("\n")
+      : "- Nao encontrei metas ativas cadastradas.";
+
+    const firstGoal = activeGoals
+      .slice()
+      .sort((a, b) => new Date(a.deadline).getTime() - new Date(b.deadline).getTime())[0];
+    const firstGoalRemaining = firstGoal ? Math.max(0, firstGoal.targetAmount - firstGoal.currentAmount) : 0;
+    const firstGoalMonthly = firstGoal ? firstGoalRemaining / monthsUntil(now, new Date(firstGoal.deadline)) : 0;
+
+    return `## Resposta direta
+
+${firstGoal ? `A meta que merece prioridade agora e **${firstGoal.title}**. Ela precisa de cerca de ${formatCurrency(firstGoalMonthly)} por mes para cumprir o prazo.` : `Voce ainda nao tem meta ativa suficiente para eu calcular ritmo de aporte.`}
+
+## O que seus dados mostram
+
+- **Saldo mensal disponivel apos despesas e parcelas:** ${formatCurrency(netBalance)}
+- **Metas ativas:** ${activeGoals.length}
+- **Metas concluidas:** ${completedGoals}
+- **Progresso medio das metas ativas:** ${formatPercent(goalProgress)}
+
+${goalLines}
+
+## O que fazer agora
+
+1. ${firstGoal ? `Compare o aporte necessario da meta "${firstGoal.title}" com sua sobra mensal de ${formatCurrency(netBalance)}.` : `Cadastre uma meta com valor-alvo e prazo.`}
+2. ${netBalance < 0 ? `Antes de aportar em meta, corrija o saldo negativo de ${formatCurrency(Math.abs(netBalance))}.` : firstGoalMonthly > netBalance ? `Ajuste prazo, valor-alvo ou aporte: hoje a meta pede mais do que a sobra projetada.` : `Automatize o aporte logo apos a entrada da renda.`}
+3. Revise metas que competem com contas pendentes ou dividas caras.
+
+## Preciso confirmar
+
+- Essa meta e essencial, desejavel ou pode esperar?
+- Existe reserva fora do app que ja conta para essa meta?`;
+  }
+
+  if (!wantsDetailedReport && focus === "savings") {
+    return `## Resposta direta
+
+${netBalance <= 0 ? `Com os dados cadastrados, ainda nao ha folga segura para investir: o saldo mensal esta em ${formatCurrency(netBalance)}.` : debtServiceRatio > 20 ? `Voce tem alguma folga, mas as parcelas ainda consomem ${formatPercent(debtServiceRatio)} da renda; antes de investir, reduza esse peso.` : `Ha uma sobra projetada de ${formatCurrency(netBalance)}. O primeiro destino deveria ser reserva e metas de curto prazo, antes de buscar rendimento.`}
+
+## O que seus dados mostram
+
+- **Receitas do mes:** ${formatCurrency(totalIncome)}
+- **Despesas + parcelas:** ${formatCurrency(totalExpenses + debtMonthlyImpact)}
+- **Saldo mensal:** ${formatCurrency(netBalance)}
+- **Taxa de poupanca:** ${formatPercent(savingsRate)}
+- **Contas pendentes:** ${pendingBills.length} (${formatCurrency(sumAmount(pendingBills))})
+- **Dividas ativas:** ${activeDebts.length}
+
+## O que fazer agora
+
+1. ${netBalance <= 0 ? `Recupere pelo menos ${formatCurrency(Math.abs(netBalance))} de fluxo antes de pensar em aporte.` : `Separe primeiro o valor das contas pendentes e so invista o que sobrar depois disso.`}
+2. ${highestInterestDebt ? `Compare qualquer rendimento esperado com a taxa da divida "${highestInterestDebt.description}" (${formatPercent(highestInterestDebt.interestRate)} ao mes).` : `Monte reserva de emergencia antes de produtos de maior risco ou prazo.`}
+3. Defina o objetivo do dinheiro: reserva, meta de curto prazo, medio prazo ou aposentadoria.
+
+## Preciso confirmar
+
+- Quanto voce ja tem em conta ou reserva fora do app?
+- O objetivo e liquidez imediata, meta com prazo ou acumulacao de longo prazo?`;
+  }
+
+  if (!wantsDetailedReport && focus === "health") {
+    const mainRisk = overdueBills.length > 0
+      ? `contas atrasadas`
+      : netBalance < 0
+        ? `saldo mensal negativo`
+        : debtServiceRatio > 20
+          ? `parcelas pesadas`
+          : savingsRate < 10
+            ? `baixa sobra mensal`
+            : `manter disciplina e transformar sobra em progresso`;
+
+    return `## Resposta direta
+
+Sua saude financeira hoje depende principalmente de **${mainRisk}**.
+
+## O que seus dados mostram
+
+- **Receitas:** ${formatCurrency(totalIncome)}
+- **Despesas:** ${formatCurrency(totalExpenses)}
+- **Parcelas de dividas:** ${formatCurrency(debtMonthlyImpact)}
+- **Saldo mensal:** ${formatCurrency(netBalance)}
+- **Taxa de poupanca:** ${formatPercent(savingsRate)}
+- **Comparacao com mes anterior:** receitas ${monthIncomeDiff >= 0 ? "subiram" : "cairam"} ${formatCurrency(Math.abs(monthIncomeDiff))}; despesas ${monthExpenseDiff >= 0 ? "subiram" : "cairam"} ${formatCurrency(Math.abs(monthExpenseDiff))}.
+
+## Plano curto
+
+1. ${overdueBills.length > 0 ? `Resolver as ${overdueBills.length} conta(s) atrasada(s).` : netBalance < 0 ? `Cortar ou renegociar ${formatCurrency(Math.abs(netBalance))} para fechar no azul.` : `Preservar a sobra mensal de ${formatCurrency(netBalance)}.`}
+2. ${topVariableCategory ? `Atacar ${topVariableCategory[0]}, que e o maior gasto variavel do mes.` : `Classificar melhor as despesas para achar cortes reais.`}
+3. ${activeDebts.length > 0 ? `Revisar dividas antes de aumentar consumo ou investimentos.` : `Criar reserva e uma meta objetiva para os proximos 90 dias.`}
+
+## Preciso confirmar
+
+- Ha saldo em conta, reserva ou investimento fora do app?
+- Alguma fatura futura ainda nao foi cadastrada?`;
+  }
+
+  if (!wantsDetailedReport && focus === "general") {
+    const strongestSignal = overdueBills.length > 0
+      ? `contas atrasadas`
+      : netBalance < 0
+        ? `saldo negativo de ${formatCurrency(Math.abs(netBalance))}`
+        : highestInterestDebt
+          ? `divida com taxa de ${formatPercent(highestInterestDebt.interestRate)} ao mes`
+          : topVariableCategory
+            ? `gasto concentrado em ${topVariableCategory[0]}`
+            : `saldo mensal de ${formatCurrency(netBalance)}`;
+
+    return `Entendi sua pergunta, mas ela ainda esta ampla. Antes de montar um relatorio completo, o principal sinal nos seus dados e: **${strongestSignal}**.
+
+Posso responder melhor se voce escolher um foco:
+
+- Dividas: o que pagar ou renegociar primeiro
+- Despesas: quais categorias cortar
+- Metas: quanto aportar e o que priorizar
+- Reserva/investimento: se existe folga para investir
+- Saude financeira: risco principal do mes`;
+  }
 
   const suggestions = buildSuggestions({
     focus,
@@ -342,8 +611,6 @@ export function buildConsultorReply(context: ConsultorContext) {
       : netBalance > 0
         ? "Seu caixa ainda esta positivo, mas pede mais disciplina para sobrar mais no fim do mes."
       : "Seu fluxo de caixa esta sob pressao e precisa de ajuste imediato.";
-
-  const highestInterestDebt = [...activeDebts].sort((a, b) => b.interestRate - a.interestRate)[0];
 
   const advisorOpening = overdueBills.length > 0
     ? `ha conta atrasada no radar, entao a prioridade e estancar multa, juros e efeito cascata antes de pensar em novos objetivos.`
