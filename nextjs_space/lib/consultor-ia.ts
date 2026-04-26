@@ -130,10 +130,19 @@ function tokenMatches(text: string, target: string) {
 function looksLikeActionProposal(question: string) {
   const normalized = compactText(question);
   if (!normalized) return false;
+  if (looksLikeCutConstraint(question)) return false;
   const asksForOptions = /^(quais|qual|como|quanto|onde|o que|que )\b/.test(normalized);
   const tentativeProposal = /(talvez|acho|penso|poderia|vou|vamos|seria|e se|sim|ok|entao)/.test(normalized);
   const concreteAction = /(diminuir|reduzir|cortar|cancelar|pausar|suspender|adiar|renegociar|baixar|tirar|parar|limitar|trocar)/.test(normalized);
   return concreteAction && (tentativeProposal || !asksForOptions);
+}
+
+function looksLikeCutConstraint(question: string) {
+  const normalized = compactText(question);
+  if (!normalized) return false;
+  const mentionsCut = /(diminuir|reduzir|cortar|cancelar|pausar|suspender|adiar|baixar|tirar|parar|limitar|mexer)/.test(normalized);
+  const blocksCut = /(nao e possivel|nao eh possivel|nao posso|nao consigo|nao da|nao tem como|nao rola|impossivel|sem como|preciso manter|nao quero mexer)/.test(normalized);
+  return mentionsCut && blocksCut;
 }
 
 function isGreetingOnly(question: string) {
@@ -398,6 +407,71 @@ export function buildConsultorReply(context: ConsultorContext) {
   const normalizedQuestion = compactText(question);
   const unsureFollowUp = /(ainda nao sei|nao sei|nao tenho certeza|tanto faz|me ajuda|decide|escolha por mim)/.test(normalizeText(question));
 
+  const buildCutConstraintReply = () => {
+    const matchingExpenses = expenses.filter((expense) =>
+      tokenMatches(normalizedQuestion, expense.category) ||
+      tokenMatches(normalizedQuestion, expense.description)
+    );
+    const matchedCategory = sortedCategories.find(({ category }) => tokenMatches(normalizedQuestion, category));
+    const blockedLabel = matchedCategory?.category
+      ?? matchingExpenses[0]?.category
+      ?? "essa categoria";
+    const blockedAmount = matchingExpenses.length > 0
+      ? sumAmount(matchingExpenses)
+      : matchedCategory?.amount ?? 0;
+    const alternatives = sortedCategories.filter(({ category }) => category !== blockedLabel);
+    const nextCategory = alternatives[0];
+    const gap = Math.max(0, Math.abs(Math.min(netBalance, 0)));
+    const hasCashGap = gap > 0;
+    const debtAction = highestInterestDebt
+      ? `renegociar a parcela da divida **"${highestInterestDebt.description}"**, porque ela pesa no caixa e tem taxa de ${formatPercent(highestInterestDebt.interestRate)} ao mes`
+      : "renegociar parcelas ou buscar uma entrada extra";
+
+    if (!nextCategory) {
+      const blockedLine = blockedAmount > 0
+        ? `Ela soma **${formatCurrency(blockedAmount)}** nos lancamentos deste mes, mas se nao da para mexer nela, eu tiro esse caminho do plano.`
+        : `Se ela nao pode cair, eu tiro esse caminho do plano.`;
+
+      return `Entendi. **${blockedLabel}** nao e um corte viavel agora.
+
+${blockedLine}
+
+${hasCashGap
+  ? `Como ainda precisamos cobrir **${formatCurrency(gap)}** no mes, a saida deixa de ser "cortar despesa" e passa a ser caixa: ${debtAction}, adiar alguma conta nao essencial ou antecipar uma entrada.`
+  : `Como seu caixa projetado esta em **${formatCurrency(netBalance)}**, eu manteria essa categoria protegida e buscaria uma folga menor em outro ponto.`}
+
+Me diga qual dessas alternativas e mais realista agora: renegociar parcela, adiar algum pagamento ou buscar uma entrada extra?`;
+    }
+
+    const nextFullCut = nextCategory.amount;
+    const nextCut15 = nextCategory.amount * 0.15;
+    const nextCut30 = nextCategory.amount * 0.3;
+    const remainingAfterFullCut = Math.max(0, gap - nextFullCut);
+    const blockedContext = blockedAmount > 0
+      ? `Ela soma **${formatCurrency(blockedAmount)}**, mas vou tratar esse valor como protegido.`
+      : `Vou tratar esse caminho como indisponivel.`;
+    const cashLine = hasCashGap
+      ? `O problema continua sendo cobrir **${formatCurrency(gap)}** no mes.`
+      : `Seu caixa projetado esta em **${formatCurrency(netBalance)}**, entao aqui o objetivo e abrir folga, nao tapar buraco.`;
+    const nextCategoryLine = hasCashGap
+      ? `O proximo alvo visivel e **${nextCategory.category}**, com **${formatCurrency(nextCategory.amount)}**. Um corte de 30% liberaria **${formatCurrency(nextCut30)}**; mesmo zerando essa categoria, ainda faltariam **${formatCurrency(remainingAfterFullCut)}**.`
+      : `O proximo alvo visivel e **${nextCategory.category}**, com **${formatCurrency(nextCategory.amount)}**. Um corte de 15% a 30% liberaria entre **${formatCurrency(nextCut15)}** e **${formatCurrency(nextCut30)}**.`;
+
+    return `Entendi. **${blockedLabel}** nao e um corte viavel agora. ${blockedContext}
+
+${cashLine}
+
+${nextCategoryLine}
+
+Entao eu mudaria a estrategia:
+
+1. Tentar o maximo possivel em **${nextCategory.category}**.
+2. Se isso nao cobrir, ${debtAction}.
+3. Se houver saldo, renda ou despesa fora do app, me informe, porque isso muda a conta.
+
+Qual caminho e mais possivel agora: mexer em **${nextCategory.category}**, renegociar a divida/parcela, ou buscar entrada extra?`;
+  };
+
   const buildActionProposalReply = () => {
     const matchingExpenses = expenses.filter((expense) =>
       tokenMatches(normalizedQuestion, expense.category) ||
@@ -631,6 +705,10 @@ Para comecar, me diga o que voce quer resolver agora. Exemplos:
 - Quais gastos posso cortar?
 - Tenho folga para investir?
 - Como organizo minhas dividas?`;
+  }
+
+  if (!wantsDetailedReport && looksLikeCutConstraint(question)) {
+    return buildCutConstraintReply();
   }
 
   if (!wantsDetailedReport && previousAssistantMessage && looksLikeActionProposal(question)) {
