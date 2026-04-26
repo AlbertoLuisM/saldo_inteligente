@@ -68,9 +68,9 @@ export default function ConfiguracoesPage() {
                 { label: 'Idioma', value: 'Português (Brasil)' },
                 { label: 'Formato de data', value: 'DD/MM/AAAA' },
               ].map(pref => (
-                <div key={pref.label} className="flex items-center justify-between py-2 border-b border-gray-50">
+                <div key={pref.label} className="flex items-center justify-between gap-4 py-2 border-b border-gray-100 dark:border-gray-700/60 last:border-b-0">
                   <span className="text-sm text-gray-600 dark:text-gray-300">{pref.label}</span>
-                  <span className="text-sm font-medium text-gray-800 dark:text-gray-100 bg-gray-100 px-3 py-1 rounded-lg">{pref.value}</span>
+                  <span className="shrink-0 rounded-lg bg-gray-100 px-3 py-1 text-right text-sm font-medium text-gray-800 dark:bg-gray-900/70 dark:text-gray-100 dark:ring-1 dark:ring-gray-700/70">{pref.value}</span>
                 </div>
               ))}
             </div>
