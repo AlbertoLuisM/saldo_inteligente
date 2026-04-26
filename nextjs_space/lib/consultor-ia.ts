@@ -103,11 +103,37 @@ function getFocus(question: string): Focus {
   if (!normalized.trim()) return "general";
   if (/(primeiro|prioridade|priorizar|aconselha|aconselharia|recomenda|recomendaria|por onde comec|o que faco|o que devo fazer|fazer agora|ainda nao sei|nao sei|me ajuda|decide|escolha por mim)/.test(normalized)) return "priority";
   if (/(divida|dividas|emprestimo|cartao|juros|quitar)/.test(normalized)) return "debt";
-  if (/(despesa|despesas|gasto|gastos|cortar|reduzir)/.test(normalized)) return "expense";
+  if (/(despesa|despesas|gasto|gastos|cortar|reduzir|diminuir|baixar|cancelar|assinatura|assinaturas)/.test(normalized)) return "expense";
   if (/(meta|metas|objetivo|objetivos)/.test(normalized)) return "goal";
   if (/(economizar|poupar|poupanca|reserva|investir)/.test(normalized)) return "savings";
   if (/(saude financeira|saude|equilibrio|fluxo de caixa)/.test(normalized)) return "health";
   return "general";
+}
+
+function compactText(value: string) {
+  return normalizeText(value)
+    .replace(/[^\p{L}\p{N}\s]/gu, " ")
+    .replace(/\s+/g, " ")
+    .trim();
+}
+
+function tokenMatches(text: string, target: string) {
+  const normalizedTarget = compactText(target);
+  if (!text || !normalizedTarget) return false;
+  if (text.includes(normalizedTarget)) return true;
+
+  const targetWithoutPlural = normalizedTarget.replace(/s\b/g, "");
+  const textWithoutPlural = text.replace(/s\b/g, "");
+  return targetWithoutPlural.length >= 4 && textWithoutPlural.includes(targetWithoutPlural);
+}
+
+function looksLikeActionProposal(question: string) {
+  const normalized = compactText(question);
+  if (!normalized) return false;
+  const asksForOptions = /^(quais|qual|como|quanto|onde|o que|que )\b/.test(normalized);
+  const tentativeProposal = /(talvez|acho|penso|poderia|vou|vamos|seria|e se|sim|ok|entao)/.test(normalized);
+  const concreteAction = /(diminuir|reduzir|cortar|cancelar|pausar|suspender|adiar|renegociar|baixar|tirar|parar|limitar|trocar)/.test(normalized);
+  return concreteAction && (tentativeProposal || !asksForOptions);
 }
 
 function isGreetingOnly(question: string) {
@@ -366,7 +392,93 @@ export function buildConsultorReply(context: ConsultorContext) {
   const previousUserMessage = messages
     .filter((message) => message.role === "user" && message.content?.trim() && message.content !== question)
     .slice(-1)[0]?.content;
+  const previousAssistantMessage = messages
+    .filter((message) => message.role === "assistant" && message.content?.trim())
+    .slice(-1)[0]?.content;
+  const normalizedQuestion = compactText(question);
   const unsureFollowUp = /(ainda nao sei|nao sei|nao tenho certeza|tanto faz|me ajuda|decide|escolha por mim)/.test(normalizeText(question));
+
+  const buildActionProposalReply = () => {
+    const matchingExpenses = expenses.filter((expense) =>
+      tokenMatches(normalizedQuestion, expense.category) ||
+      tokenMatches(normalizedQuestion, expense.description)
+    );
+    const matchedCategory = sortedCategories.find(({ category }) => tokenMatches(normalizedQuestion, category));
+    const targetLabel = matchedCategory?.category
+      ?? matchingExpenses[0]?.category
+      ?? (/(assinatura|assinaturas)/.test(normalizedQuestion) ? "assinaturas" : "esse corte");
+    const targetAmount = matchingExpenses.length > 0
+      ? sumAmount(matchingExpenses)
+      : matchedCategory?.amount ?? 0;
+    const gap = Math.max(0, Math.abs(Math.min(netBalance, 0)));
+    const hasCashGap = gap > 0;
+    const cut15 = targetAmount * 0.15;
+    const cut30 = targetAmount * 0.3;
+    const bestFallbackCategory = topVariableCategory && topVariableCategory[0] !== targetLabel
+      ? { category: topVariableCategory[0], amount: topVariableCategory[1] }
+      : sortedCategories.find(({ category }) => category !== targetLabel);
+    const targetReference = targetLabel === "esse corte" ? "desse gasto" : `de **${targetLabel}**`;
+    const targetQuestion = targetLabel === "esse corte" ? "nesse corte" : `em **${targetLabel}**`;
+    const isSubscriptionTarget = /(assinatura|assinaturas)/.test(compactText(targetLabel));
+    const immediateAction = isSubscriptionTarget
+      ? "cancele ou pause as assinaturas sem uso ate chegar no maior valor possivel"
+      : `reduza ou adie gastos ${targetQuestion} ate chegar no maior valor possivel`;
+
+    if (targetAmount <= 0) {
+      const fallbackLine = bestFallbackCategory
+        ? `Pelos lancamentos deste mes, o maior alvo visivel e **${bestFallbackCategory.category}**, com ${formatCurrency(bestFallbackCategory.amount)}.`
+        : `Ainda nao tenho uma categoria forte o suficiente para medir esse corte nos lancamentos do mes.`;
+      const setupAction = targetLabel === "esse corte"
+        ? "cadastre esse gasto de forma mais clara"
+        : `cadastre ou ajuste lancamentos ${targetReference} com esse nome`;
+      const cashActionLine = hasCashGap
+        ? `Como o mes esta negativo em **${formatCurrency(gap)}**, eu faria assim: ${setupAction}, some quanto custa, e corte primeiro o que nao for essencial.`
+        : `Como seu caixa projetado esta em **${formatCurrency(netBalance)}**, esse corte serviria para aumentar sua folga. Eu faria assim: ${setupAction}, some quanto custa, e corte primeiro o que nao for essencial.`;
+      const nextStepLine = hasCashGap
+        ? "Com esse numero eu te falo se o corte resolve o buraco ou se precisamos atacar outra categoria junto."
+        : "Com esse numero eu te falo quanta folga isso cria e qual destino priorizar para o dinheiro.";
+
+      return `Boa direcao. So que eu nao encontrei **${targetLabel}** de forma clara nos lancamentos deste mes, entao nao quero fingir uma conta.
+
+${fallbackLine}
+
+${cashActionLine}
+
+Me diga o valor aproximado ${targetReference}. ${nextStepLine}`;
+    }
+
+    const remainingAfter15 = Math.max(0, gap - cut15);
+    const remainingAfter30 = Math.max(0, gap - cut30);
+    const fullCutLine = !hasCashGap
+      ? `Se voce cortar essa categoria, o valor economizado vira folga para reserva, divida ou meta.`
+      : targetAmount >= gap
+      ? `Se voce conseguisse cortar **${formatCurrency(gap)}** dentro dessa categoria, ela sozinha cobriria o buraco do mes.`
+      : `Mesmo zerando essa categoria, ainda faltariam **${formatCurrency(gap - targetAmount)}** para cobrir todo o buraco do mes.`;
+    const fallbackLine = bestFallbackCategory
+      ? `Se esse corte nao chegar la, o segundo alvo deveria ser **${bestFallbackCategory.category}**, que soma ${formatCurrency(bestFallbackCategory.amount)}.`
+      : `Se esse corte nao chegar la, o proximo passo e revisar uma segunda despesa variavel.`;
+    const cashProblemLine = hasCashGap
+      ? `O problema e que o caixa esta negativo em **${formatCurrency(gap)}**.`
+      : `Seu caixa projetado esta em **${formatCurrency(netBalance)}**; esse corte aumentaria sua folga.`;
+    const impactLines = hasCashGap
+      ? `1. Cortar 15% liberaria cerca de **${formatCurrency(cut15)}**; ainda faltariam **${formatCurrency(remainingAfter15)}**.
+2. Cortar 30% liberaria cerca de **${formatCurrency(cut30)}**; ainda faltariam **${formatCurrency(remainingAfter30)}**.`
+      : `1. Cortar 15% liberaria cerca de **${formatCurrency(cut15)}**; sua folga iria para **${formatCurrency(netBalance + cut15)}**.
+2. Cortar 30% liberaria cerca de **${formatCurrency(cut30)}**; sua folga iria para **${formatCurrency(netBalance + cut30)}**.`;
+
+    return `Boa. **${targetLabel}** faz sentido como primeiro corte, principalmente porque e uma despesa que costuma ser negociavel.
+
+Pelos dados cadastrados, essa categoria soma **${formatCurrency(targetAmount)}** no mes. ${cashProblemLine}
+
+Minha leitura:
+
+${impactLines}
+3. ${fullCutLine}
+
+Entao eu faria assim: hoje, ${immediateAction}. ${fallbackLine}
+
+Quanto voce acha que consegue reduzir ${targetQuestion} este mes: algo perto de ${formatCurrency(cut15)}, ${formatCurrency(cut30)} ou mais?`;
+  };
 
   const buildPriorityReply = () => {
     if (totalIncome <= 0 && totalExpenses <= 0 && activeDebts.length === 0 && activeGoals.length === 0) {
@@ -519,6 +631,10 @@ Para comecar, me diga o que voce quer resolver agora. Exemplos:
 - Quais gastos posso cortar?
 - Tenho folga para investir?
 - Como organizo minhas dividas?`;
+  }
+
+  if (!wantsDetailedReport && previousAssistantMessage && looksLikeActionProposal(question)) {
+    return buildActionProposalReply();
   }
 
   if (!wantsDetailedReport && focus === "priority") {
