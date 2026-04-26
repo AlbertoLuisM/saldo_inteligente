@@ -1,33 +1,11 @@
 import { NextRequest } from "next/server";
 import { getServerSession } from "next-auth";
-import OpenAI from "openai";
-import type {
-  ResponseCreateParamsStreaming,
-  ResponseStreamEvent,
-} from "openai/resources/responses/responses";
 
 import { authOptions } from "@/lib/auth-options";
-import {
-  buildConsultorLlmInput,
-  buildConsultorReply,
-  CONSULTOR_IA_SYSTEM_PROMPT,
-  createSsePayloadChunks,
-} from "@/lib/consultor-ia";
+import { buildConsultorReply, createSsePayloadChunks } from "@/lib/consultor-ia";
 import { prisma } from "@/lib/prisma";
 
 export const dynamic = "force-dynamic";
-
-function createSseDelta(content: string) {
-  return `data: ${JSON.stringify({ choices: [{ delta: { content } }] })}\n\n`;
-}
-
-function createDoneEvent() {
-  return "data: [DONE]\n\n";
-}
-
-function supportsGpt5Parameters(model: string) {
-  return model.startsWith("gpt-5");
-}
 
 export async function POST(request: NextRequest) {
   try {
@@ -90,7 +68,7 @@ export async function POST(request: NextRequest) {
       }),
     ]);
 
-    const consultorContext = {
+    const responseText = buildConsultorReply({
       now,
       question: latestUserMessage,
       messages,
@@ -104,77 +82,7 @@ export async function POST(request: NextRequest) {
       accountsReceivable,
       recentIncomes,
       recentExpenses,
-    };
-
-    if (process.env.OPENAI_API_KEY) {
-      const client = new OpenAI({ apiKey: process.env.OPENAI_API_KEY });
-      const encoder = new TextEncoder();
-      const model = process.env.OPENAI_MODEL || "gpt-5.5";
-      const requestOptions: ResponseCreateParamsStreaming = {
-        model,
-        instructions: CONSULTOR_IA_SYSTEM_PROMPT,
-        input: buildConsultorLlmInput(consultorContext),
-        stream: true,
-        max_output_tokens: Number(process.env.OPENAI_MAX_OUTPUT_TOKENS || 1400),
-      };
-
-      if (supportsGpt5Parameters(model)) {
-        requestOptions.reasoning = {
-          effort: (process.env.OPENAI_REASONING_EFFORT || "low") as "none" | "minimal" | "low" | "medium" | "high" | "xhigh",
-        };
-        requestOptions.text = {
-          verbosity: (process.env.OPENAI_TEXT_VERBOSITY || "medium") as "low" | "medium" | "high",
-        };
-      }
-
-      const openaiStream = await client.responses.create(requestOptions);
-
-      const stream = new ReadableStream({
-        async start(controller) {
-          let sentContent = false;
-
-          try {
-            for await (const event of openaiStream as AsyncIterable<ResponseStreamEvent>) {
-              if (event.type === "response.output_text.delta" && event.delta) {
-                sentContent = true;
-                controller.enqueue(encoder.encode(createSseDelta(event.delta)));
-              }
-
-              if (event.type === "error") {
-                throw new Error(event.message || "OpenAI stream error");
-              }
-            }
-
-            controller.enqueue(encoder.encode(createDoneEvent()));
-            controller.close();
-          } catch (error) {
-            console.error("Consultor IA OpenAI stream error:", error);
-
-            if (!sentContent) {
-              const fallbackText = buildConsultorReply(consultorContext);
-              for (const chunk of createSsePayloadChunks(fallbackText)) {
-                controller.enqueue(encoder.encode(createSseDelta(chunk)));
-              }
-            } else {
-              controller.enqueue(encoder.encode(createSseDelta("\n\nTive uma instabilidade ao concluir a resposta. Se quiser, me envie a pergunta de novo que eu continuo daqui.")));
-            }
-
-            controller.enqueue(encoder.encode(createDoneEvent()));
-            controller.close();
-          }
-        },
-      });
-
-      return new Response(stream, {
-        headers: {
-          "Content-Type": "text/event-stream; charset=utf-8",
-          "Cache-Control": "no-cache",
-          Connection: "keep-alive",
-        },
-      });
-    }
-
-    const responseText = buildConsultorReply(consultorContext);
+    });
 
     const chunks = createSsePayloadChunks(responseText);
     const encoder = new TextEncoder();
@@ -182,9 +90,12 @@ export async function POST(request: NextRequest) {
     const stream = new ReadableStream({
       start(controller) {
         for (const chunk of chunks) {
-          controller.enqueue(encoder.encode(createSseDelta(chunk)));
+          const payload = JSON.stringify({
+            choices: [{ delta: { content: chunk } }],
+          });
+          controller.enqueue(encoder.encode(`data: ${payload}\n\n`));
         }
-        controller.enqueue(encoder.encode(createDoneEvent()));
+        controller.enqueue(encoder.encode("data: [DONE]\n\n"));
         controller.close();
       },
     });
