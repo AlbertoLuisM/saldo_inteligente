@@ -16,8 +16,15 @@ export async function POST(request: NextRequest) {
 
     const userId = (session.user as { id: string }).id;
     const { messages: userMessages } = await request.json();
+    const messages = Array.isArray(userMessages)
+      ? userMessages
+          .filter((message: { role?: string; content?: string }) =>
+            (message.role === "user" || message.role === "assistant") && typeof message.content === "string"
+          )
+          .slice(-8)
+      : [];
     const latestUserMessage =
-      [...(userMessages ?? [])]
+      [...messages]
         .reverse()
         .find((message: { role?: string; content?: string }) => message.role === "user")
         ?.content ?? "";
@@ -64,6 +71,7 @@ export async function POST(request: NextRequest) {
     const responseText = buildConsultorReply({
       now,
       question: latestUserMessage,
+      messages,
       incomes,
       expenses,
       lastMonthIncomes,
