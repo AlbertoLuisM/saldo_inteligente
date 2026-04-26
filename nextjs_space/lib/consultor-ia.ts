@@ -37,6 +37,36 @@ interface Suggestion {
   priority: number;
 }
 
+export const CONSULTOR_IA_SYSTEM_PROMPT = `Voce e o Consultor Financeiro IA do Saldo Inteligente.
+
+Papel do produto:
+- Agir como consultor financeiro digital de primeira camada, nao como assessor CVM real, advogado, contador ou vendedor de investimento.
+- Conversar naturalmente com o usuario, como em uma consultoria curta: responda a pergunta feita, conduza o proximo passo e use os dados cadastrados.
+- Diagnosticar fluxo de caixa, dividas, metas, contas a pagar/receber e organizacao financeira.
+- Priorizar o que reduz mais risco primeiro: conta atrasada, saldo negativo, divida cara, baixa sobra mensal, meta sem ritmo ou gasto variavel concentrado.
+
+Regras de resposta:
+- Nao entregue relatorio completo por padrao. Relatorio completo so quando o usuario pedir "relatorio", "analise completa", "visao geral" ou equivalente.
+- Para saudacoes e conversa aberta, responda de forma breve e humana, depois sugira uma pergunta util.
+- Se o usuario disser que nao sabe por onde comecar, escolha voce a prioridade pelos dados e diga "eu comecaria por...".
+- Use numeros concretos do contexto financeiro sempre que existirem: renda, despesas, parcelas, saldo, taxa de poupanca, comprometimento com dividas, contas pendentes, recebiveis e metas.
+- Se faltarem dados relevantes, de uma resposta provisoria e faca no maximo duas perguntas objetivas.
+- Nunca invente saldo bancario, investimentos, fatura futura, renda fora do app, taxas de mercado, Selic, CDI, IPCA ou perfil de risco. Se nao estiver no contexto, diga que nao sabe.
+- Para investimento, primeiro verifique fluxo, reserva, dividas caras e contas pendentes. Nao recomende produto especifico sem suitability.
+- Nao diga "compre", "venda", "garantido" ou prometa retorno.
+- Para temas juridicos, tributarios, valores altos, alavancagem, cripto, derivativos, offshore ou planejamento complexo, aumente cautela e recomende validacao profissional.
+
+Tom:
+- Portugues brasileiro, direto, humano, sem culpa e sem jargao desnecessario.
+- Frases curtas. Priorize decisao pratica.
+- Fale como consultor: "Eu comecaria por...", "O numero que mais pesa e...", "O que eu faria hoje...".
+- Termine, quando fizer sentido, com uma pergunta simples para continuar a conversa.
+
+Formato:
+- Use Markdown leve.
+- Para respostas normais, prefira 2 a 5 paragrafos curtos ou uma lista de ate 3 passos.
+- Para analise completa, use secoes curtas: Parecer, Diagnostico, O que fazer agora, Pontos a confirmar.`;
+
 const FIXED_CATEGORY_KEYWORDS = [
   "moradia",
   "saude",
@@ -74,6 +104,17 @@ function formatCurrency(value: number) {
 
 function formatPercent(value: number) {
   return `${value.toFixed(1).replace(".", ",")}%`;
+}
+
+function formatDate(value: Date | string | null | undefined) {
+  if (!value) return null;
+  const date = value instanceof Date ? value : new Date(value);
+  if (Number.isNaN(date.getTime())) return null;
+  return date.toISOString().slice(0, 10);
+}
+
+function roundNumber(value: number, decimals = 2) {
+  return Number(value.toFixed(decimals));
 }
 
 function sumAmount<T extends { amount: number }>(items: T[]) {
@@ -277,6 +318,193 @@ function buildSuggestions(params: {
     .sort((a, b) => b.priority - a.priority)
     .filter((suggestion, index, all) => all.findIndex((item) => item.key === suggestion.key) === index)
     .slice(0, 4);
+}
+
+export function buildConsultorLlmInput(context: ConsultorContext) {
+  const {
+    now,
+    question,
+    messages = [],
+    incomes,
+    expenses,
+    lastMonthIncomes,
+    lastMonthExpenses,
+    debts,
+    goals,
+    accountsPayable,
+    accountsReceivable,
+    recentIncomes,
+    recentExpenses,
+  } = context;
+
+  const totalIncome = sumAmount(incomes);
+  const totalExpenses = sumAmount(expenses);
+  const activeDebts = debts.filter((debt) => debt.status === "active");
+  const totalDebt = activeDebts.reduce((sum, debt) => sum + debt.remainingBalance, 0);
+
+  let debtMonthlyImpact = 0;
+  for (const debt of activeDebts) {
+    if (debt.paidInstallments >= debt.installments) continue;
+    debtMonthlyImpact += debt.installmentAmount
+      ? debt.installmentAmount
+      : calcPMT(debt.originalAmount, debt.interestRate, debt.installments);
+  }
+
+  const fixedExpenses = expenses.filter(isFixedExpense);
+  const variableExpenses = expenses.filter((expense) => !isFixedExpense(expense));
+  const fixedTotal = sumAmount(fixedExpenses);
+  const variableTotal = sumAmount(variableExpenses);
+  const netBalance = totalIncome - totalExpenses - debtMonthlyImpact;
+  const savingsRate = totalIncome > 0 ? (netBalance / totalIncome) * 100 : 0;
+  const debtServiceRatio = totalIncome > 0 ? (debtMonthlyImpact / totalIncome) * 100 : 0;
+  const lastMonthIncome = sumAmount(lastMonthIncomes);
+  const lastMonthExpense = sumAmount(lastMonthExpenses);
+
+  const overdueBills = accountsPayable.filter((bill) => {
+    const dueDate = new Date(bill.dueDate);
+    return bill.status === "overdue" || (bill.status === "pending" && dueDate < now);
+  });
+  const pendingBills = accountsPayable.filter((bill) => bill.status === "pending");
+  const pendingReceivables = accountsReceivable.filter((item) => item.status !== "received");
+
+  const categories = new Map<string, number>();
+  for (const expense of expenses) {
+    categories.set(expense.category, (categories.get(expense.category) ?? 0) + expense.amount);
+  }
+
+  const variableCategories = new Map<string, number>();
+  for (const expense of variableExpenses) {
+    variableCategories.set(expense.category, (variableCategories.get(expense.category) ?? 0) + expense.amount);
+  }
+
+  const activeGoals = goals.filter((goal) => goal.currentAmount < goal.targetAmount);
+  const snapshot = {
+    dataReferencia: formatDate(now),
+    perguntaAtual: question,
+    indicadores: {
+      receitasMes: roundNumber(totalIncome),
+      despesasMes: roundNumber(totalExpenses),
+      despesasFixasMes: roundNumber(fixedTotal),
+      despesasVariaveisMes: roundNumber(variableTotal),
+      parcelasDividasMes: roundNumber(debtMonthlyImpact),
+      saldoMensalProjetado: roundNumber(netBalance),
+      taxaPoupancaPercentual: roundNumber(savingsRate, 1),
+      comprometimentoDividasPercentual: roundNumber(debtServiceRatio, 1),
+      totalDividasAtivas: roundNumber(totalDebt),
+      comparacaoMesAnterior: {
+        receitasMesAnterior: roundNumber(lastMonthIncome),
+        despesasMesAnterior: roundNumber(lastMonthExpense),
+        variacaoReceitas: roundNumber(totalIncome - lastMonthIncome),
+        variacaoDespesas: roundNumber(totalExpenses - lastMonthExpense),
+      },
+    },
+    maioresCategoriasDespesa: [...categories.entries()]
+      .sort((a, b) => b[1] - a[1])
+      .slice(0, 6)
+      .map(([categoria, valor]) => ({ categoria, valor: roundNumber(valor) })),
+    maioresCategoriasVariaveis: [...variableCategories.entries()]
+      .sort((a, b) => b[1] - a[1])
+      .slice(0, 5)
+      .map(([categoria, valor]) => ({ categoria, valor: roundNumber(valor) })),
+    receitasMes: incomes.map((income) => ({
+      descricao: income.description,
+      valor: roundNumber(income.amount),
+      categoria: income.category,
+      data: formatDate(income.date),
+      recorrencia: income.recurrence,
+    })),
+    despesasMes: expenses.map((expense) => ({
+      descricao: expense.description,
+      valor: roundNumber(expense.amount),
+      categoria: expense.category,
+      data: formatDate(expense.date),
+      recorrencia: expense.recurrence,
+      formaPagamento: expense.paymentMethod,
+      tipoEstimado: isFixedExpense(expense) ? "fixa" : "variavel",
+    })),
+    dividas: debts.map((debt) => ({
+      descricao: debt.description,
+      credor: debt.creditor,
+      status: debt.status,
+      valorOriginal: roundNumber(debt.originalAmount),
+      saldoDevedor: roundNumber(debt.remainingBalance),
+      taxaMensalPercentual: roundNumber(debt.interestRate, 2),
+      parcelas: debt.installments,
+      parcelasPagas: debt.paidInstallments,
+      valorParcela: roundNumber(debt.installmentAmount || calcPMT(debt.originalAmount, debt.interestRate, debt.installments)),
+      vencimento: formatDate(debt.dueDate),
+    })),
+    metas: goals.map((goal) => {
+      const remaining = Math.max(0, goal.targetAmount - goal.currentAmount);
+      const months = monthsUntil(now, new Date(goal.deadline));
+      return {
+        titulo: goal.title,
+        categoria: goal.category,
+        descricao: goal.description,
+        valorAlvo: roundNumber(goal.targetAmount),
+        valorAtual: roundNumber(goal.currentAmount),
+        valorFaltante: roundNumber(remaining),
+        prazo: formatDate(goal.deadline),
+        mesesAtePrazo: months,
+        aporteMensalNecessario: roundNumber(remaining / months),
+        status: activeGoals.some((activeGoal) => activeGoal.id === goal.id) ? "ativa" : "concluida",
+      };
+    }),
+    contasAPagar: accountsPayable.map((bill) => ({
+      descricao: bill.description,
+      valor: roundNumber(bill.amount),
+      vencimento: formatDate(bill.dueDate),
+      categoria: bill.category,
+      status: bill.status,
+      estaAtrasada: overdueBills.some((overdueBill) => overdueBill.id === bill.id),
+    })),
+    contasAReceber: accountsReceivable.map((item) => ({
+      descricao: item.description,
+      valor: roundNumber(item.amount),
+      dataEsperada: formatDate(item.expectedDate),
+      pagador: item.payer,
+      status: item.status,
+    })),
+    resumoPendencias: {
+      contasAtrasadas: overdueBills.length,
+      contasPendentes: pendingBills.length,
+      valorContasPendentes: roundNumber(sumAmount(pendingBills)),
+      recebiveisPendentes: pendingReceivables.length,
+      valorRecebiveisPendentes: roundNumber(sumAmount(pendingReceivables)),
+    },
+    transacoesRecentes: [
+      ...recentIncomes.slice(0, 6).map((income) => ({
+        tipo: "receita",
+        descricao: income.description,
+        valor: roundNumber(income.amount),
+        categoria: income.category,
+        data: formatDate(income.date),
+      })),
+      ...recentExpenses.slice(0, 10).map((expense) => ({
+        tipo: "despesa",
+        descricao: expense.description,
+        valor: roundNumber(expense.amount),
+        categoria: expense.category,
+        data: formatDate(expense.date),
+      })),
+    ],
+  };
+
+  const chatHistory = messages
+    .slice(-8)
+    .map((message) => `${message.role === "assistant" ? "Consultor" : "Usuario"}: ${message.content?.trim()}`)
+    .join("\n");
+
+  return `Contexto financeiro estruturado do usuario no Saldo Inteligente:
+${JSON.stringify(snapshot, null, 2)}
+
+Historico recente da conversa:
+${chatHistory || "(sem historico)"}
+
+Ultima mensagem do usuario:
+${question}
+
+Responda agora como Consultor Financeiro IA. Use o contexto acima como fonte de verdade.`;
 }
 
 export function buildConsultorReply(context: ConsultorContext) {
